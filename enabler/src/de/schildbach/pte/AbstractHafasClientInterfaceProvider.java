@@ -788,7 +788,7 @@ public abstract class AbstractHafasClientInterfaceProvider extends AbstractHafas
                 Preconditions.checkState(svcResList.length() == 2);
                 ResultHeader header = this.parseServerInfo(svcResList.getJSONObject(0), head.getString("ver"));
                 JSONObject svcRes = svcResList.getJSONObject(1);
-                Preconditions.checkState("LocGeoPos".equals(svcRes.getString("meth")));
+                Preconditions.checkState("JourneyDetails".equals(svcRes.getString("meth")));
                 String err = svcRes.getString("err");
                 if (!"OK".equals(err)) {
                     String errTxt = svcRes.optString("errTxt");
