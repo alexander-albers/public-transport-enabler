@@ -44,6 +44,7 @@ import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
+import com.google.common.base.Preconditions;
 import de.schildbach.pte.dto.*;
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -777,67 +778,71 @@ public abstract class AbstractHafasClientInterfaceProvider extends AbstractHafas
         final CharSequence page = httpClient.get(url, request, "application/json");
 
         try {
-            final JSONObject head = new JSONObject(page.toString());
-            final String headErr = head.optString("err", null);
-            if (headErr != null)
-                throw new RuntimeException(headErr);
-            final ResultHeader header = new ResultHeader(network, SERVER_PRODUCT, head.getString("ver"), null, 0, null);
+            JSONObject head = new JSONObject(page.toString());
+            String headErr = head.optString("err", null);
+            if (headErr != null && !"OK".equals(headErr)) {
+                String headErrTxt = head.optString("errTxt");
+                throw new RuntimeException(headErr + " " + headErrTxt);
+            } else {
+                JSONArray svcResList = head.getJSONArray("svcResL");
+                Preconditions.checkState(svcResList.length() == 2);
+                ResultHeader header = this.parseServerInfo(svcResList.getJSONObject(0), head.getString("ver"));
+                JSONObject svcRes = svcResList.getJSONObject(1);
+                Preconditions.checkState("LocGeoPos".equals(svcRes.getString("meth")));
+                String err = svcRes.getString("err");
+                if (!"OK".equals(err)) {
+                    String errTxt = svcRes.optString("errTxt");
+                    log.debug("Hafas error: {} {}", err, errTxt);
+                    throw new RuntimeException(err + " " + errTxt);
+                } else {
+                    final JSONObject res = svcRes.getJSONObject("res");
 
-            final JSONArray svcResList = head.getJSONArray("svcResL");
-            checkState(svcResList.length() == 1);
-            final JSONObject svcRes = svcResList.optJSONObject(0);
-            checkState("JourneyDetails".equals(svcRes.getString("meth")));
+                    final JSONObject common = res.getJSONObject("common");
+                    final List<String[]> remarks = parseRemList(common.getJSONArray("remL"));
+                    final JSONArray locList = common.getJSONArray("locL");
+                    final List<Style> styles = parseIcoList(common.getJSONArray("icoL"));
+                    final List<String> operators = parseOpList(common.getJSONArray("opL"));
+                    final JSONArray crdSysList = common.optJSONArray("crdSysL");
+                    final List<Line> lines = parseProdList(common.getJSONArray("prodL"), operators, styles);
 
-            final String err = svcRes.getString("err");
-            if (!"OK".equals(err)) {
-                return new QueryJourneyDetailResult(QueryJourneyDetailResult.Status.SERVICE_DOWN);
-            }
-            final JSONObject res = svcRes.getJSONObject("res");
+                    final JSONObject jny = res.getJSONObject("journey");
 
-            final JSONObject common = res.getJSONObject("common");
-            final List<String[]> remarks = parseRemList(common.getJSONArray("remL"));
-            final JSONArray locList = common.getJSONArray("locL");
-	        final List<Style> styles = parseIcoList(common.getJSONArray("icoL"));
-            final List<String> operators = parseOpList(common.getJSONArray("opL"));
-	        final JSONArray crdSysList = common.optJSONArray("crdSysL");
-            final List<Line> lines = parseProdList(common.getJSONArray("prodL"), operators, styles);
+                    final Calendar c = new GregorianCalendar(timeZone);
+                    ParserUtils.parseIsoDate(c, jny.getString("date"));
+                    final Date baseDate = c.getTime();
 
-            final JSONObject jny = res.getJSONObject("journey");
+                    final Line line = lines.get(jny.getInt("prodX"));
+                    final String dirTxt = jny.optString("dirTxt", null);
+                    final Location destination = dirTxt != null ? new Location(LocationType.ANY, null, null, dirTxt)
+                            : null;
 
-            final Calendar c = new GregorianCalendar(timeZone);
-            ParserUtils.parseIsoDate(c, jny.getString("date"));
-            final Date baseDate = c.getTime();
+                    final JSONArray stopList = jny.getJSONArray("stopL");
+                    checkState(stopList.length() >= 2);
+                    final List<Stop> intermediateStops = new ArrayList<>(stopList.length());
+                    for (int iStop = 0; iStop < stopList.length(); iStop++) {
+                        final JSONObject stop = stopList.getJSONObject(iStop);
+                        final Stop intermediateStop = parseJsonStop(stop, locList, crdSysList, c, baseDate);
+                        intermediateStops.add(intermediateStop);
+                    }
 
-            final Line line = lines.get(jny.getInt("prodX"));
-            final String dirTxt = jny.optString("dirTxt", null);
-            final Location destination = dirTxt != null ? new Location(LocationType.ANY, null, null, dirTxt)
-                    : null;
+                    final JSONArray remList = jny.optJSONArray("remL");
+                    String message = null;
+                    if (remList != null) {
+                        for (int iRem = 0; iRem < remList.length(); iRem++) {
+                            final JSONObject rem = remList.getJSONObject(iRem);
+                            final String[] remark = remarks.get(rem.getInt("remX"));
+                            if ("l?".equals(remark[0]))
+                                message = remark[1];
+                        }
+                    }
 
-            final JSONArray stopList = jny.getJSONArray("stopL");
-            checkState(stopList.length() >= 2);
-            final List<Stop> intermediateStops = new ArrayList<>(stopList.length());
-            for (int iStop = 0; iStop < stopList.length(); iStop++) {
-                final JSONObject stop = stopList.getJSONObject(iStop);
-                final Stop intermediateStop = parseJsonStop(stop, locList, crdSysList, c, baseDate);
-                intermediateStops.add(intermediateStop);
-            }
+                    Trip.Leg leg = new Trip.Public(line, destination, intermediateStops.remove(0), intermediateStops.remove(intermediateStops.size() - 1), intermediateStops, null,
+                            message);
+                    Trip trip = new Trip(journeyId, leg.departure, leg.arrival, Collections.singletonList(leg), Collections.<Fare>emptyList(), new int[0], 0);
 
-            final JSONArray remList = jny.optJSONArray("remL");
-            String message = null;
-            if (remList != null) {
-                for (int iRem = 0; iRem < remList.length(); iRem++) {
-                    final JSONObject rem = remList.getJSONObject(iRem);
-                    final String[] remark = remarks.get(rem.getInt("remX"));
-                    if ("l?".equals(remark[0]))
-                        message = remark[1];
+                    return new QueryJourneyDetailResult(QueryJourneyDetailResult.Status.OK, trip);
                 }
             }
-
-            Trip.Leg leg = new Trip.Public(line, destination, intermediateStops.remove(0), intermediateStops.remove(intermediateStops.size() - 1), intermediateStops, null,
-                    message);
-            Trip trip = new Trip(journeyId, leg.departure, leg.arrival, Collections.singletonList(leg), Collections.<Fare>emptyList(), new int[0], 0);
-
-            return new QueryJourneyDetailResult(QueryJourneyDetailResult.Status.OK, trip);
         } catch (Exception e) {
             e.printStackTrace();
             return new QueryJourneyDetailResult(QueryJourneyDetailResult.Status.SERVICE_DOWN);
