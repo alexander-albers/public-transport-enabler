@@ -44,6 +44,7 @@ import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
+import de.schildbach.pte.dto.*;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -56,26 +57,6 @@ import com.google.common.hash.HashFunction;
 import com.google.common.hash.Hashing;
 import com.google.common.io.BaseEncoding;
 
-import de.schildbach.pte.dto.Departure;
-import de.schildbach.pte.dto.Fare;
-import de.schildbach.pte.dto.Line;
-import de.schildbach.pte.dto.Location;
-import de.schildbach.pte.dto.LocationType;
-import de.schildbach.pte.dto.NearbyLocationsResult;
-import de.schildbach.pte.dto.Point;
-import de.schildbach.pte.dto.Position;
-import de.schildbach.pte.dto.Product;
-import de.schildbach.pte.dto.QueryDeparturesResult;
-import de.schildbach.pte.dto.QueryTripsContext;
-import de.schildbach.pte.dto.QueryTripsResult;
-import de.schildbach.pte.dto.ResultHeader;
-import de.schildbach.pte.dto.StationDepartures;
-import de.schildbach.pte.dto.Stop;
-import de.schildbach.pte.dto.Style;
-import de.schildbach.pte.dto.SuggestLocationsResult;
-import de.schildbach.pte.dto.SuggestedLocation;
-import de.schildbach.pte.dto.Trip;
-import de.schildbach.pte.dto.TripOptions;
 import de.schildbach.pte.exception.ParserException;
 import de.schildbach.pte.util.ParserUtils;
 import de.schildbach.pte.util.PolylineFormat;
@@ -84,7 +65,7 @@ import okhttp3.HttpUrl;
 
 /**
  * This is an implementation of the HCI (HAFAS Client Interface).
- * 
+ *
  * @author Andreas Schildbach
  */
 public abstract class AbstractHafasClientInterfaceProvider extends AbstractHafasProvider {
@@ -786,6 +767,80 @@ public abstract class AbstractHafasClientInterfaceProvider extends AbstractHafas
             return new QueryTripsResult(header, null, from, null, to, context, trips);
         } catch (final JSONException x) {
             throw new ParserException("cannot parse json: '" + page + "' on " + url, x);
+        }
+    }
+
+    public QueryJourneyDetailResult queryJourneyDetails(String journeyId) throws IOException {
+        final String request = wrapJsonApiRequest("JourneyDetails", "{\"jid\": \"" + journeyId + "\"}",false);
+
+        final HttpUrl url = requestUrl(request);
+        final CharSequence page = httpClient.get(url, request, "application/json");
+
+        try {
+            final JSONObject head = new JSONObject(page.toString());
+            final String headErr = head.optString("err", null);
+            if (headErr != null)
+                throw new RuntimeException(headErr);
+            final ResultHeader header = new ResultHeader(network, SERVER_PRODUCT, head.getString("ver"), null, 0, null);
+
+            final JSONArray svcResList = head.getJSONArray("svcResL");
+            checkState(svcResList.length() == 1);
+            final JSONObject svcRes = svcResList.optJSONObject(0);
+            checkState("JourneyDetails".equals(svcRes.getString("meth")));
+
+            final String err = svcRes.getString("err");
+            if (!"OK".equals(err)) {
+                return new QueryJourneyDetailResult(QueryJourneyDetailResult.Status.SERVICE_DOWN);
+            }
+            final JSONObject res = svcRes.getJSONObject("res");
+
+            final JSONObject common = res.getJSONObject("common");
+            final List<String[]> remarks = parseRemList(common.getJSONArray("remL"));
+            final JSONArray locList = common.getJSONArray("locL");
+	        final List<Style> styles = parseIcoList(common.getJSONArray("icoL"));
+            final List<String> operators = parseOpList(common.getJSONArray("opL"));
+	        final JSONArray crdSysList = common.optJSONArray("crdSysL");
+            final List<Line> lines = parseProdList(common.getJSONArray("prodL"), operators, styles);
+
+            final JSONObject jny = res.getJSONObject("journey");
+
+            final Calendar c = new GregorianCalendar(timeZone);
+            ParserUtils.parseIsoDate(c, jny.getString("date"));
+            final Date baseDate = c.getTime();
+
+            final Line line = lines.get(jny.getInt("prodX"));
+            final String dirTxt = jny.optString("dirTxt", null);
+            final Location destination = dirTxt != null ? new Location(LocationType.ANY, null, null, dirTxt)
+                    : null;
+
+            final JSONArray stopList = jny.getJSONArray("stopL");
+            checkState(stopList.length() >= 2);
+            final List<Stop> intermediateStops = new ArrayList<>(stopList.length());
+            for (int iStop = 0; iStop < stopList.length(); iStop++) {
+                final JSONObject stop = stopList.getJSONObject(iStop);
+                final Stop intermediateStop = parseJsonStop(stop, locList, crdSysList, c, baseDate);
+                intermediateStops.add(intermediateStop);
+            }
+
+            final JSONArray remList = jny.optJSONArray("remL");
+            String message = null;
+            if (remList != null) {
+                for (int iRem = 0; iRem < remList.length(); iRem++) {
+                    final JSONObject rem = remList.getJSONObject(iRem);
+                    final String[] remark = remarks.get(rem.getInt("remX"));
+                    if ("l?".equals(remark[0]))
+                        message = remark[1];
+                }
+            }
+
+            Trip.Leg leg = new Trip.Public(line, destination, intermediateStops.remove(0), intermediateStops.remove(intermediateStops.size() - 1), intermediateStops, null,
+                    message);
+            Trip trip = new Trip(journeyId, leg.departure, leg.arrival, Collections.singletonList(leg), Collections.<Fare>emptyList(), new int[0], 0);
+
+            return new QueryJourneyDetailResult(QueryJourneyDetailResult.Status.OK, trip);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return new QueryJourneyDetailResult(QueryJourneyDetailResult.Status.SERVICE_DOWN);
         }
     }
 
