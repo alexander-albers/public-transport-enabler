@@ -1073,7 +1073,11 @@ public abstract class AbstractHafasClientInterfaceProvider extends AbstractHafas
                 return parseLoc(locList, mMastLocX, previousLocListIndexes, crdSysList);
             }
             locationType = LocationType.STATION;
-            id = normalizeStationId(loc.getString("extId"));
+            if (loc.has("lid")) {
+                id = loc.getString("lid");
+            } else {
+                id = normalizeStationId(loc.getString("extId"));
+            }
             placeAndName = splitStationName(loc.getString("name"));
             final int pCls = loc.optInt("pCls", -1);
             products = pCls != -1 ? intToProducts(pCls) : null;
